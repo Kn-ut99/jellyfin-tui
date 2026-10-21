@@ -17,6 +17,10 @@ tls-rustls = [
     "reqwest/rustls",
     "tokio-tungstenite/rustls-tls-webpki-roots"
 ]
+# Render cover art with libchafa in terminals without sixel/kitty/iTerm2 image support
+# (Terminator, Konsole, GNOME Console...). Much finer than plain halfblocks. Needs libchafa >= 1.8
+# at build time (pkg-config) and at runtime.
+chafa = ["ratatui-image/chafa-dyn"]
 
 [dependencies]
 reqwest = { version = "0.13.1", default-features = false, features = ["json", "stream", "blocking", "query", "http2"] }

@@ -663,3 +663,12 @@ sixel (or equivalent) support or have certain key event limitations. The followi
 The following have issues:
 
 - konsole, alacritty, gnome console, terminator (no sixel support and occasional strange behavior)
+
+In terminals without image support, cover art falls back to unicode blocks. Building with the
+`chafa` feature renders it with [chafa](https://hpjansson.org/chafa/) instead, which looks much
+closer to the real cover. It needs libchafa (>= 1.8) installed, e.g. `libchafa-dev` on
+Debian/Ubuntu or `chafa` on Arch:
+
+```bash
+cargo install --path . --features chafa
+```

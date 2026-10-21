@@ -24,7 +24,20 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
-use ratatui_image::{Resize, StatefulImage};
+use ratatui_image::{FilterType, Resize, StatefulImage};
+
+/// Filter used when scaling cover art down to the pane. ratatui-image defaults to `Nearest`,
+/// which aliases badly on large covers and is most visible with halfblocks (terminals without
+/// sixel/kitty support), where every cell is only two pixels.
+const ART_FILTER: FilterType = FilterType::CatmullRom;
+
+fn art_scale() -> Resize {
+    Resize::Scale(Some(ART_FILTER))
+}
+
+fn art_fit() -> Resize {
+    Resize::Fit(Some(ART_FILTER))
+}
 
 impl App {
     pub fn render_home(&mut self, app_container: Rect, frame: &mut Frame) {
@@ -182,7 +195,7 @@ impl App {
         // axis and rounds a cell up
         let img_area = match fitted {
             Some((width, height)) => Size::new(width, height),
-            None => cover_art.size_for(Resize::Scale(None), chunk_area.as_size()),
+            None => cover_art.size_for(art_scale(), chunk_area.as_size()),
         };
 
         let block_height = img_area.height + 2;
@@ -201,7 +214,7 @@ impl App {
             width: img_area.width,
             height: img_area.height,
         };
-        let image = StatefulImage::default().resize(Resize::Scale(None));
+        let image = StatefulImage::default().resize(art_scale());
         frame.render_stateful_widget(image, centered, cover_art);
 
         layout
@@ -1819,14 +1832,18 @@ impl App {
         if art_width > 0 {
             if let Some(art) = self.cover_art.as_mut() {
                 let slot = columns[0];
-                let size = art.size_for(Resize::Fit(None), slot.as_size());
+                let size = art.size_for(art_fit(), slot.as_size());
                 let centered = Rect {
                     x: slot.x + slot.width.saturating_sub(size.width) / 2,
                     y: slot.y + slot.height.saturating_sub(size.height) / 2,
                     width: size.width,
                     height: size.height,
                 };
-                frame.render_stateful_widget(StatefulImage::default(), centered, art);
+                frame.render_stateful_widget(
+                    StatefulImage::default().resize(art_fit()),
+                    centered,
+                    art,
+                );
             }
         }
 
@@ -2090,14 +2107,14 @@ impl App {
 
             if let Some(cover_art) = self.cover_art.as_mut() {
                 let img_size =
-                    cover_art.size_for(Resize::Scale(None), Size::new(inset.width, inset.height));
+                    cover_art.size_for(art_scale(), Size::new(inset.width, inset.height));
                 let centered = Rect {
                     x: inset.x + (inset.width.saturating_sub(img_size.width)) / 2,
                     y: inset.y + (inset.height.saturating_sub(img_size.height)) / 2,
                     width: img_size.width,
                     height: img_size.height,
                 };
-                let image = StatefulImage::default().resize(Resize::Scale(None));
+                let image = StatefulImage::default().resize(art_scale());
                 frame.render_stateful_widget(image, centered, cover_art);
             }
         }
