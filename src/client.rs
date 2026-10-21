@@ -567,7 +567,7 @@ impl Client {
                 ("SortOrder", "Ascending"),
                 ("Recursive", "true"),
                 ("ImageTypeLimit", "1"),
-                ("Fields", "DateCreated"),
+                ("Fields", "DateCreated,ItemCounts"),
                 ("StartIndex", "0"),
             ]);
 
@@ -1754,6 +1754,9 @@ pub struct Artist {
     media_type: String,
     #[serde(rename = "DateCreated", default)]
     pub date_created: String,
+    /// From `Fields=ItemCounts`. Jellyfin omits it for the odd artist, so 0 means unknown.
+    #[serde(rename = "AlbumCount", default)]
+    pub album_count: u64,
 }
 
 impl Searchable for Artist {
@@ -1893,6 +1896,9 @@ pub struct DiscographySong {
     pub download_status: DownloadStatus,
     #[serde(default)]
     pub disliked: bool,
+    /// Index in the playlist pane; tells duplicates apart.
+    #[serde(skip)]
+    pub playlist_position: i64,
 }
 
 impl Searchable for DiscographySong {
@@ -1987,6 +1993,7 @@ impl<'r> FromRow<'r, sqlx::sqlite::SqliteRow> for DiscographySong {
                 .unwrap_or(DownloadStatus::NotDownloaded),
             disliked: row.get::<i32, _>("disliked") != 0,
             musicbrainz_album_id: None,
+            playlist_position: 0,
         })
     }
 }
@@ -2058,7 +2065,7 @@ pub struct Lyrics {
     #[serde(rename = "Lyrics", default)]
     lyrics: Vec<Lyric>,
 }
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct Lyric {
     #[serde(rename = "Text", default)]
     pub text: String,

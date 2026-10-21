@@ -7,13 +7,17 @@ Keyboard related functions
 use crate::{
     client::{Album, Artist, DiscographySong},
     database::{
-        database::{Command, DownloadCommand, MembershipCommand, RemoveCommand, UpdateCommand},
+        database::{
+            t_discography_updater, t_playlist_updater, Command, DownloadCommand, MembershipCommand,
+            RemoveCommand, UpdateCommand,
+        },
         extension::DownloadStatus,
     },
     sort,
     tui::App,
 };
 use std::borrow::Cow;
+use std::sync::Arc;
 
 use crate::database::extension::{
     get_album_tracks, get_discography, get_playlist_tracks, get_tracks, set_favorite_album,
@@ -686,6 +690,10 @@ impl App {
                 Action::Previous => self.previous().await,
                 Action::Seek(secs) => self.execute_seek(*secs).await,
                 Action::Volume(delta) => self.volume_delta(*delta).await,
+                Action::ToggleFavorite => {
+                    let current = self.state.current_playback_state.current_index;
+                    self.toggle_favorite_queue_item(current).await;
+                }
 
                 Action::Up => {}
                 Action::Down => {}
@@ -1826,14 +1834,14 @@ impl App {
         match (self.state.active_section, self.state.active_tab) {
             (ActiveSection::List, ActiveTab::Library) => {
                 if up {
-                    page_up_list(
+                    page_up_table(
                         self.artists.len(),
                         delta,
                         &mut self.state.selected_artist,
                         &mut self.state.artists_scroll_state,
                     );
                 } else {
-                    page_down_list(
+                    page_down_table(
                         self.artists.len(),
                         delta,
                         &mut self.state.selected_artist,
@@ -1843,14 +1851,14 @@ impl App {
             }
             (ActiveSection::List, ActiveTab::Albums) => {
                 if up {
-                    page_up_list(
+                    page_up_table(
                         self.albums.len(),
                         delta,
                         &mut self.state.selected_album,
                         &mut self.state.albums_scroll_state,
                     );
                 } else {
-                    page_down_list(
+                    page_down_table(
                         self.albums.len(),
                         delta,
                         &mut self.state.selected_album,
@@ -1860,14 +1868,14 @@ impl App {
             }
             (ActiveSection::List, ActiveTab::Playlists) => {
                 if up {
-                    page_up_list(
+                    page_up_table(
                         self.playlists.len(),
                         delta,
                         &mut self.state.selected_playlist,
                         &mut self.state.playlists_scroll_state,
                     );
                 } else {
-                    page_down_list(
+                    page_down_table(
                         self.playlists.len(),
                         delta,
                         &mut self.state.selected_playlist,
@@ -1935,7 +1943,7 @@ impl App {
     fn page_up(&mut self) {
         match (self.state.active_section, self.state.active_tab) {
             (ActiveSection::List, ActiveTab::Library) => {
-                page_up_list(
+                page_up_table(
                     self.artists.len(),
                     self.left_list_height,
                     &mut self.state.selected_artist,
@@ -1943,7 +1951,7 @@ impl App {
                 );
             }
             (ActiveSection::List, ActiveTab::Albums) => {
-                page_up_list(
+                page_up_table(
                     self.albums.len(),
                     self.left_list_height,
                     &mut self.state.selected_album,
@@ -1951,7 +1959,7 @@ impl App {
                 );
             }
             (ActiveSection::List, ActiveTab::Playlists) => {
-                page_up_list(
+                page_up_table(
                     self.playlists.len(),
                     self.left_list_height,
                     &mut self.state.selected_playlist,
@@ -1990,7 +1998,7 @@ impl App {
     fn page_down(&mut self) {
         match (self.state.active_section, self.state.active_tab) {
             (ActiveSection::List, ActiveTab::Library) => {
-                page_down_list(
+                page_down_table(
                     self.artists.len(),
                     self.left_list_height,
                     &mut self.state.selected_artist,
@@ -1998,7 +2006,7 @@ impl App {
                 );
             }
             (ActiveSection::List, ActiveTab::Albums) => {
-                page_down_list(
+                page_down_table(
                     self.albums.len(),
                     self.left_list_height,
                     &mut self.state.selected_album,
@@ -2006,7 +2014,7 @@ impl App {
                 );
             }
             (ActiveSection::List, ActiveTab::Playlists) => {
-                page_down_list(
+                page_down_table(
                     self.playlists.len(),
                     self.left_list_height,
                     &mut self.state.selected_playlist,
@@ -2823,6 +2831,28 @@ impl App {
         }
     }
 
+    async fn toggle_favorite_queue_item(&mut self, index: usize) {
+        let Some(client) = &self.client else { return };
+        let Some(song) = self.state.queue.get(index) else { return };
+        let (id, favorite) = (song.id.clone(), !song.is_favorite);
+
+        let _ = client.set_favorite(&id, favorite).await;
+        let _ = set_favorite_track(&self.db.pool, &id, favorite).await;
+
+        for song in self.state.queue.iter_mut().filter(|s| s.id == id) {
+            song.is_favorite = favorite;
+        }
+        for track in self
+            .tracks
+            .iter_mut()
+            .chain(self.album_tracks.iter_mut())
+            .chain(self.playlist_tracks.iter_mut())
+            .filter(|t| t.id == id)
+        {
+            track.user_data.is_favorite = favorite;
+        }
+    }
+
     async fn toggle_favorite(&mut self) {
         match self.state.active_section {
             ActiveSection::List => {
@@ -2990,21 +3020,143 @@ impl App {
                 }
             }
             ActiveSection::Queue => {
-                if let Some(client) = &self.client {
-                    let selected = self.state.selected_queue_item.selected().unwrap_or(0);
-                    let track = &self.state.queue[selected].clone();
-                    let _ = client.set_favorite(&track.id, !track.is_favorite).await;
-                    self.state.queue[selected].is_favorite = !track.is_favorite;
-                    if let Some(tr) = self.tracks.iter_mut().find(|t| t.id == track.id) {
-                        tr.user_data.is_favorite = !track.is_favorite;
-                    }
-                }
+                let selected = self.state.selected_queue_item.selected().unwrap_or(0);
+                self.toggle_favorite_queue_item(selected).await;
             }
             _ => {}
         }
     }
 
+    /// `d` / `D` on the album or playlist list acts on the whole album / playlist.
+    async fn download_selected_container(&mut self, remove: bool) {
+        let verb = if remove { "Removing" } else { "Downloading" };
+
+        let (name, result) = match self.state.active_tab {
+            ActiveTab::Albums => {
+                let id = self.get_id_of_selected(&self.albums, Selectable::Album);
+                if crate::album_groups::is_group_row(&id) {
+                    self.warn("Open the group to download its albums");
+                    return;
+                }
+                let Some(album) = self.albums.iter().find(|a| a.id == id).cloned() else {
+                    return;
+                };
+                // the fetch below blocks, so say what we're doing first
+                self.notify(format!("{} {}", verb, album.name));
+                let result = self.download_album(&album, remove).await;
+                (album.name, result)
+            }
+            ActiveTab::Playlists => {
+                let id = self.get_id_of_selected(&self.playlists, Selectable::Playlist);
+                let Some(playlist) = self.playlists.iter().find(|p| p.id == id).cloned() else {
+                    return;
+                };
+                self.notify(format!("{} {}", verb, playlist.name));
+                let result = self.download_playlist(&playlist.id, remove).await;
+                (playlist.name, result)
+            }
+            _ => return,
+        };
+
+        match result {
+            Ok(0) => self.notify(format!("Nothing to do for {}", name)),
+            Ok(n) => self.notify(format!("{} {} tracks from {}", verb, n, name)),
+            Err(e) => self.error(e),
+        }
+    }
+
+    /// Queue (or remove) every track of an album. The tracks may never have been fetched, so the
+    /// discography is refreshed first. Returns how many tracks were acted on.
+    pub async fn download_album(&mut self, album: &Album, remove: bool) -> Result<usize, String> {
+        let Some(client) = self.client.clone() else {
+            return Err("Not available offline.".to_string());
+        };
+
+        let parent = match album.album_artists.first() {
+            Some(artist) => artist.id.clone(),
+            None => album.parent_id.clone(),
+        };
+        t_discography_updater(
+            Arc::clone(&self.db.pool),
+            parent.clone(),
+            self.db.status_tx.clone(),
+            client,
+        )
+        .await
+        .map_err(|_| format!("Failed to fetch artist {}.", parent))?;
+
+        let tracks = get_album_tracks(&self.db.pool, &album.id, self.client.as_ref())
+            .await
+            .map_err(|_| format!("Failed fetching tracks of {}.", album.name))?;
+
+        self.queue_tracks_download(tracks, remove).await
+    }
+
+    /// Same for a playlist. Membership is only in the db once the playlist has been opened, so
+    /// refresh it first.
+    pub async fn download_playlist(
+        &mut self,
+        playlist_id: &str,
+        remove: bool,
+    ) -> Result<usize, String> {
+        let Some(client) = self.client.clone() else {
+            return Err("Not available offline.".to_string());
+        };
+
+        t_playlist_updater(
+            Arc::clone(&self.db.pool),
+            playlist_id.to_string(),
+            self.db.status_tx.clone(),
+            client,
+        )
+        .await
+        .map_err(|_| "Failed to fetch the playlist.".to_string())?;
+
+        let tracks = get_playlist_tracks(&self.db.pool, playlist_id, self.client.as_ref())
+            .await
+            .map_err(|_| "Failed fetching playlist tracks.".to_string())?;
+
+        self.queue_tracks_download(tracks, remove).await
+    }
+
+    /// Tracks already in the wanted state are skipped. Removal covers queued and in-flight
+    /// downloads too, which the db task cancels.
+    async fn queue_tracks_download(
+        &mut self,
+        tracks: Vec<DiscographySong>,
+        remove: bool,
+    ) -> Result<usize, String> {
+        let tracks = tracks
+            .into_iter()
+            .filter(|t| {
+                if remove {
+                    !matches!(t.download_status, DownloadStatus::NotDownloaded)
+                } else {
+                    !matches!(t.download_status, DownloadStatus::Downloaded)
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let n = tracks.len();
+        if n == 0 {
+            return Ok(0);
+        }
+
+        let command = if remove {
+            Command::Remove(RemoveCommand::Tracks { tracks })
+        } else {
+            Command::Download(DownloadCommand::Tracks { tracks })
+        };
+        self.db.cmd_tx.send(command).await.map_err(|_| "Database task is gone.".to_string())?;
+
+        Ok(n)
+    }
+
     async fn download(&mut self, remove: bool) {
+        if self.state.active_section == ActiveSection::List {
+            self.download_selected_container(remove).await;
+            return;
+        }
         if self.state.active_section != ActiveSection::Tracks {
             return;
         }
@@ -3174,7 +3326,9 @@ impl App {
             self.warn("Playlist is still loading");
             return;
         }
-        self.begin_playlist_edit();
+        if !self.playlist_editing && !self.begin_playlist_edit() {
+            return;
+        }
 
         let idx = self.state.selected_playlist_track.selected().unwrap_or(0);
 
@@ -3187,22 +3341,45 @@ impl App {
 
         // swap with neighbor (item keeps moving)
         self.playlist_tracks.swap(idx, new_idx);
+        self.renumber_playlist_positions();
         self.playlist_track_select_by_index(new_idx);
     }
 
-    fn begin_playlist_edit(&mut self) {
+    /// Keep `playlist_position` equal to the entry's index after mutating `playlist_tracks`.
+    pub(crate) fn renumber_playlist_positions(&mut self) {
+        for (i, track) in self.playlist_tracks.iter_mut().enumerate() {
+            track.playlist_position = i as i64;
+        }
+    }
+
+    /// Start a reorder at the cursor. Returns false (and warns) for a repeated track, which the
+    /// server's Move endpoint can't address unambiguously.
+    fn begin_playlist_edit(&mut self) -> bool {
         if self.playlist_editing
             || self.select.is_active()
             || !self.state.playlist_tracks_search_term.is_empty()
         {
-            return;
+            return false;
         }
 
         let idx = self.state.selected_playlist_track.selected().unwrap_or(0);
+        let Some(track) = self.playlist_tracks.get(idx) else {
+            return false;
+        };
+
+        let copies = self.playlist_tracks.iter().filter(|t| t.id == track.id).count();
+        if copies > 1 {
+            let name = track.name.clone();
+            self.warn(format!(
+                "'{}' appears {} times — the server cannot move one copy",
+                name, copies
+            ));
+            return false;
+        }
 
         self.playlist_editing = true;
         self.playlist_edit_origin_index = Some(idx);
-        self.playlist_edit_item_id = Some(self.playlist_tracks[idx].id.clone());
+        true
     }
 
     pub fn cancel_playlist_edit(&mut self) {
@@ -3210,21 +3387,21 @@ impl App {
             return;
         }
 
-        let Some(item_id) = self.playlist_edit_item_id.clone() else {
-            return;
-        };
         let Some(origin) = self.playlist_edit_origin_index else {
             return;
         };
 
-        if let Some(current) = self.playlist_tracks.iter().position(|t| t.id == item_id) {
+        // The dragged entry stays selected, so the cursor is its current index.
+        let current = self.state.selected_playlist_track.selected().unwrap_or(origin);
+        if current < self.playlist_tracks.len() {
             let item = self.playlist_tracks.remove(current);
+            let origin = origin.min(self.playlist_tracks.len());
             self.playlist_tracks.insert(origin, item);
-            self.playlist_track_select_by_index(origin);
         }
+        self.renumber_playlist_positions();
+        self.playlist_track_select_by_index(origin);
 
         self.playlist_editing = false;
-        self.playlist_edit_item_id = None;
         self.playlist_edit_origin_index = None;
     }
 
@@ -3236,12 +3413,21 @@ impl App {
         let Some(client) = self.client.as_ref() else { return };
 
         let playlist_id = self.get_id_of_selected(&self.playlists, Selectable::Playlist);
-        let item_id = self.playlist_edit_item_id.clone().unwrap();
 
-        let new_index = self.playlist_tracks.iter().position(|t| t.id == item_id).unwrap();
+        // the cursor is the entry's new index; the client call needs the media id
+        let new_index = self
+            .state
+            .selected_playlist_track
+            .selected()
+            .unwrap_or(self.playlist_edit_origin_index.unwrap_or(0));
+        let Some(media_id) = self.playlist_tracks.get(new_index).map(|t| t.id.clone()) else {
+            self.playlist_editing = false;
+            self.playlist_edit_origin_index = None;
+            return;
+        };
 
         let moved = client
-            .move_playlist_item(&item_id, &playlist_id, new_index)
+            .move_playlist_item(&media_id, &playlist_id, new_index)
             .await
             .is_ok_and(|resp| resp.status().is_success());
 
@@ -3258,10 +3444,10 @@ impl App {
                     track_ids,
                 }))
                 .await;
+            self.renumber_playlist_positions();
         }
 
         self.playlist_editing = false;
-        self.playlist_edit_item_id = None;
         self.playlist_edit_origin_index = None;
     }
 
@@ -3447,8 +3633,7 @@ impl App {
         self.popup.selected.select(Some(1));
     }
 
-    /// Remove the given tracks (playlist entry ids, or media ids as fallback) from the current
-    /// playlist, then leave select mode.
+    /// Remove the tracks named by the given entry-position keys; all copies of a track go.
     pub async fn remove_playlist_tracks(&mut self, keys: Vec<String>) {
         if keys.is_empty() {
             return;
@@ -3461,46 +3646,47 @@ impl App {
         }
         let playlist_name = self.state.current_playlist.name.clone();
 
-        let mut removed: Vec<&String> = Vec::new();
-        for key in &keys {
-            // a refused removal is still an Ok response
-            let res = client.remove_from_playlist(key, &playlist_id).await;
-            if res.and_then(|r| r.error_for_status()).is_ok() {
-                removed.push(key);
+        let mut unique_ids: Vec<String> = Vec::new();
+        for t in self.playlist_tracks.iter().filter(|t| keys.contains(&playlist_track_key(t))) {
+            if !unique_ids.contains(&t.id) {
+                unique_ids.push(t.id.clone());
             }
         }
-        let removed_ok = removed.len();
+
+        let mut removed_ids: Vec<String> = Vec::new();
+        for id in &unique_ids {
+            // a refused removal is still an Ok response
+            let res = client.remove_from_playlist(id, &playlist_id).await;
+            if res.and_then(|r| r.error_for_status()).is_ok() {
+                removed_ids.push(id.clone());
+            }
+        }
+        let removed_ok = removed_ids.len();
 
         if removed_ok > 0 {
-            let selection: std::collections::HashSet<&String> = removed.into_iter().collect();
-            // collect the media ids before dropping the rows; local membership is keyed on the
-            // track, not the playlist entry
-            let removed_track_ids: Vec<String> = self
-                .playlist_tracks
+            let duplicate_names: Vec<String> = removed_ids
                 .iter()
-                .filter(|t| selection.contains(&playlist_track_key(t)))
-                .map(|t| t.id.clone())
+                .filter_map(|id| {
+                    let mut copies = self.playlist_tracks.iter().filter(|t| &t.id == id);
+                    let first = copies.next()?;
+                    let n = 1 + copies.count();
+                    (n > 1).then(|| format!("'{}' ×{}", first.name, n))
+                })
                 .collect();
 
-            self.playlist_tracks.retain(|t| !selection.contains(&playlist_track_key(t)));
+            let before = self.playlist_tracks.len();
+            self.playlist_tracks.retain(|t| !removed_ids.contains(&t.id));
+            let rows_removed = before - self.playlist_tracks.len();
+            self.renumber_playlist_positions();
             self.playlist_track_select_by_index(0);
 
-            if let Some(p) = self.playlists.iter_mut().find(|p| p.id == playlist_id) {
-                p.child_count = p.child_count.saturating_sub(removed_ok as u64);
-            }
-            if self.state.current_playlist.id == playlist_id {
-                self.state.current_playlist.child_count =
-                    self.state.current_playlist.child_count.saturating_sub(removed_ok as u64);
-            }
-
-            // drop the rows locally too, otherwise reopening the playlist reads the removed
-            // tracks straight back out of sqlite until the background update lands
+            // server drops every copy
             let _ = self
                 .db
                 .cmd_tx
                 .send(Command::Membership(MembershipCommand::RemoveTracks {
                     playlist_id: playlist_id.clone(),
-                    track_ids: removed_track_ids,
+                    track_ids: removed_ids,
                 }))
                 .await;
             let _ = self
@@ -3509,18 +3695,24 @@ impl App {
                 .send(Command::Update(UpdateCommand::Playlist { playlist_id: playlist_id.clone() }))
                 .await;
 
-            if removed_ok < keys.len() {
+            if !duplicate_names.is_empty() {
+                self.warn(format!(
+                    "Removed all copies of {} from {}",
+                    duplicate_names.join(", "),
+                    playlist_name
+                ));
+            } else if removed_ok < unique_ids.len() {
                 self.warn(format!(
                     "Removed {} of {} tracks from {}",
                     removed_ok,
-                    keys.len(),
+                    unique_ids.len(),
                     playlist_name
                 ));
             } else {
                 self.notify(format!(
                     "Removed {} track{} from {}",
-                    removed_ok,
-                    if removed_ok == 1 { "" } else { "s" },
+                    rows_removed,
+                    if rows_removed == 1 { "" } else { "s" },
                     playlist_name
                 ));
             }
@@ -3827,40 +4019,6 @@ impl App {
                 log::error!("Failed to fetch search tracks page {}: {}", self.search_track_page, e);
             }
         }
-    }
-}
-
-fn page_up_list(
-    len: usize,
-    step: usize,
-    state: &mut ratatui::widgets::ListState,
-    scroll: &mut ratatui::widgets::ScrollbarState,
-) {
-    if len == 0 {
-        return;
-    }
-    let cur = state.selected().unwrap_or(0);
-    let new = cur.saturating_sub(step.max(1));
-    state.select(Some(new));
-    for _ in 0..step {
-        scroll.prev();
-    }
-}
-
-fn page_down_list(
-    len: usize,
-    step: usize,
-    state: &mut ratatui::widgets::ListState,
-    scroll: &mut ratatui::widgets::ScrollbarState,
-) {
-    if len == 0 {
-        return;
-    }
-    let cur = state.selected().unwrap_or(0);
-    let new = (cur + step.max(1)).min(len.saturating_sub(1));
-    state.select(Some(new));
-    for _ in 0..step {
-        scroll.next();
     }
 }
 

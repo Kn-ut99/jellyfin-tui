@@ -116,6 +116,10 @@ When you run jellyfin-tui for the first time, it will guide you through creating
 authenticate using either username/password, password file, or Jellyfin Quick Connect. Each of these options then uses
 locally stored auth tokens for future logins.
 
+Passwords entered during setup are stored in the system keyring. If the keyring is unavailable, you can choose to save
+the password in plaintext in the config instead. A server with a `username` but no `password` or `password_file` reads its
+password from the keyring.
+
 The program **prints the config location** when run. On Linux, the configuration file is located at
 `~/.config/jellyfin-tui/config.yaml`. Feel free to edit it manually if needed.
 
@@ -126,6 +130,9 @@ servers:
     username: 'username'
     password: 'imcool123'
     default: true # Add to skip server picker on startup. Use --select-server to override
+  - name: Keyring Server
+    url: 'https://jellyfin.example3.com'
+    username: 'username' # no password set, read from the system keyring
   - name: Quick Connect Server
     url: 'http://localhost:8096'
     quick_connect: true # use Jellyfin Quick Connect
@@ -158,6 +165,9 @@ lyrics: 'always' # options: 'always', 'never', 'auto'
 album_column: auto # options: 'auto', true, false
 album_column_threshold: 140 # columns; only used when album_column is 'auto'
 
+# Show how many albums each artist has, beside their name in the Artists list
+artist_album_count: true
+
 # Layout mode — 'auto' switches to vertical below vertical_threshold columns
 layout: auto # options: 'auto', 'vertical', 'horizontal'
 vertical_threshold: 100 # columns; only used when layout is 'auto'
@@ -186,7 +196,12 @@ symbols:
   selector: ">>"
   spinner: "◰◳◲◱"
   separator: "›"
+  # between the bits of one line: stream details, album and year, tabs
+  dot: "·"
   disc: "○"
+  # the player's progress rail
+  progress_filled: "━"
+  progress_unfilled: "─"
   # popup markers: checked/unchecked for multi-select, radio_on/radio_off for single choice
   checked: "☑"
   unchecked: "☐"
@@ -292,6 +307,7 @@ The `accent` color gets written to a file each time it changes. It lives in the 
 | `scrollbar_thumb`              | Scrollbar handle color.                                                                                                               |
 | `scrollbar_track`              | Scrollbar track color.                                                                                                                |
 | `progress_fill`                | Played/filled portion of progress bars.                                                                                               |
+| `progress_buffered`            | Stretch the stream has buffered ahead of the playhead. Unset derives it from `progress_fill`; match `progress_track` to hide it.       |
 | `progress_track`               | Unfilled portion of progress bars.                                                                                                    |
 | `tab_active_foreground`        | Text color of the active tab.                                                                                                         |
 | `tab_inactive_foreground`      | Text color of inactive tabs.                                                                                                          |
@@ -647,3 +663,12 @@ sixel (or equivalent) support or have certain key event limitations. The followi
 The following have issues:
 
 - konsole, alacritty, gnome console, terminator (no sixel support and occasional strange behavior)
+
+In terminals without image support, cover art falls back to unicode blocks. Building with the
+`chafa` feature renders it with [chafa](https://hpjansson.org/chafa/) instead, which looks much
+closer to the real cover. It needs libchafa (>= 1.8) installed, e.g. `libchafa-dev` on
+Debian/Ubuntu or `chafa` on Arch:
+
+```bash
+cargo install --path . --features chafa
+```

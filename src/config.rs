@@ -19,8 +19,9 @@ pub struct AuthEntry {
 // ServerId -> AuthEntry
 pub type AuthCache = HashMap<String, AuthEntry>;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub enum LyricsVisibility {
+    #[default]
     Always,
     Auto,
     Never,
@@ -30,13 +31,14 @@ impl LyricsVisibility {
         match val {
             "auto" => Self::Auto,
             "never" => Self::Never,
-            _ => Self::Always,
+            _ => Self::default(),
         }
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub enum LayoutMode {
+    #[default]
     Auto,
     Vertical,
     Horizontal,
@@ -46,7 +48,7 @@ impl LayoutMode {
         match val {
             "vertical" => Self::Vertical,
             "horizontal" => Self::Horizontal,
-            _ => Self::Auto,
+            _ => Self::default(),
         }
     }
 
@@ -59,9 +61,10 @@ impl LayoutMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum AlbumColumn {
     Always,
+    #[default]
     Auto,
     Never,
 }
@@ -70,7 +73,7 @@ impl AlbumColumn {
         match val.and_then(|v| v.as_bool()) {
             Some(true) => Self::Always,
             Some(false) => Self::Never,
-            None => Self::Auto,
+            None => Self::default(),
         }
     }
 
@@ -196,6 +199,20 @@ fn select_server_interactively(servers: &[serde_yaml::Value]) -> Option<&serde_y
     Some(&servers[selection])
 }
 
+const KEYRING_SERVICE: &str = "jellyfin-tui";
+
+fn keyring_entry(username: &str, url: &str) -> keyring::Result<keyring::Entry> {
+    keyring::Entry::new(KEYRING_SERVICE, &format!("{}@{}", username, url))
+}
+
+fn keyring_get_password(username: &str, url: &str) -> keyring::Result<String> {
+    keyring_entry(username, url)?.get_password()
+}
+
+fn keyring_set_password(username: &str, url: &str, password: &str) -> keyring::Result<()> {
+    keyring_entry(username, url)?.set_password(password)
+}
+
 fn parse_server(server: &serde_yaml::Value) -> SelectedServer {
     let url = match server["url"].as_str() {
         Some(url) if !url.ends_with('/') => url.to_string(),
@@ -231,10 +248,16 @@ fn parse_server(server: &serde_yaml::Value) -> SelectedServer {
                     );
                     std::process::exit(1);
                 }
-                (None, None) => {
-                    println!(" ! Selected server does not have a password configured");
-                    std::process::exit(1);
-                }
+                (None, None) => match keyring_get_password(username, &url) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        println!(
+                            " ! No password in config, and none found in the system keyring ({}). Delete config.yaml to run the setup again, or set `quick_connect: true` for this server.",
+                            e
+                        );
+                        std::process::exit(1);
+                    }
+                },
             };
 
             AuthMethod::UserPass { username: username.to_string(), password }
@@ -484,12 +507,34 @@ pub fn initialize_config() {
     }
 
     let server_entry = match auth_method {
-        OnboardingAuth::UserPass => serde_json::json!({
-            "name": server_name.trim(),
-            "url": server_url.trim(),
-            "username": username.trim(),
-            "password": password.trim(),
-        }),
+        OnboardingAuth::UserPass => {
+            let mut entry = serde_json::json!({
+                "name": server_name.trim(),
+                "url": server_url.trim(),
+                "username": username.trim(),
+            });
+            match keyring_set_password(username.trim(), server_url.trim(), password.trim()) {
+                Ok(()) => println!(" - Password stored in the system keyring."),
+                Err(e) => {
+                    println!(" ! Could not use the system keyring: {}", e);
+                    let save_plaintext = Confirm::with_theme(&DialogTheme::default())
+                        .with_prompt("Save the password in plaintext in the config file instead?")
+                        .default(false)
+                        .wait_for_newline(true)
+                        .interact_opt()
+                        .unwrap_or(None)
+                        .unwrap_or(false);
+                    if !save_plaintext {
+                        println!(
+                            " - Setup aborted, nothing was saved. Run again and choose Quick Connect to avoid storing a password."
+                        );
+                        std::process::exit(1);
+                    }
+                    entry["password"] = serde_json::Value::from(password.trim());
+                }
+            }
+            entry
+        }
         OnboardingAuth::QuickConnect => serde_json::json!({
             "name": server_name.trim(),
             "url": server_url.trim(),
